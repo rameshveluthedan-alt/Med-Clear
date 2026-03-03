@@ -5,6 +5,8 @@ from PIL import Image
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from flask import Flask
+from threading import Thread
 
 # Load secrets
 load_dotenv()
@@ -73,4 +75,25 @@ def handle_medical_image(message):
         bot.reply_to(message, f"❌ Oops! Something went wrong: {str(e)}")
 
 print("🚀 Med-Clear Bot is live! Send a photo of a medical doc to your Telegram bot.")
+
+# 2. THE RENDER KEEP-ALIVE LOGIC
+
+server = Flask('')
+
+@server.route('/')
+def home():
+    return "Med-Clear is running!"
+
+def run():
+    # Render's dynamic port
+    port = int(os.environ.get("PORT", 10000))
+    server.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.daemon = True # This ensures the thread shuts down if the bot stops
+    t.start()
+
+# Start the web server thread
+keep_alive()
 bot.infinity_polling()
