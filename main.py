@@ -69,7 +69,7 @@ def handle_medical_image(message):
         )
 
         # 4. Send result back
-        bot.reply_to(message, response.text, parse_mode="Markdown")
+        bot.reply_to(message, response.text, parse_mode=None)
 
     except Exception as e:
         bot.reply_to(message, f"❌ Oops! Something went wrong: {str(e)}")
