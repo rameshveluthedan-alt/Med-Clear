@@ -29,7 +29,7 @@ def send_welcome(message):
         "3. I will simplify the complex terms and give you questions for your doctor.\n\n"
         "⚠️ *Disclaimer: I am an AI, not a doctor. My summaries are for informational purposes only and do not replace professional medical advice.*"
     )
-    bot.reply_to(message, welcome_text, parse_mode="HTML")
+    bot.reply_to(message, welcome_text, parse_mode="Markdown")
 @bot.message_handler(content_types=['photo'])
 def handle_medical_image(message):
     try:
@@ -88,7 +88,7 @@ def handle_medical_image(message):
             )
 
         # 4. Send result back
-        bot.reply_to(message, response.text, parse_mode=None)
+        bot.reply_to(message, response.text, parse_mode="HTML")
 
     except Exception as e:
         print(f"General Error: {e}")
