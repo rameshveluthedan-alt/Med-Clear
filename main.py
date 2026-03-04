@@ -57,16 +57,21 @@ def handle_medical_image(message):
         2. Explain what they are in simple, non-scary language.
         3. Flag any values with '⚠️' if they seem outside a standard range.
         4. Provide 3 questions for the user to ask their doctor.
-        Format your response using these HTML rules:
+        Format your response using ONLY these HTML rules:
 
-        1. **Disclaimer**: Wrap the disclaimer in <i><b>bold italics</b></i> at the very top.
-        2. **Sections**: Use <u><b>UNDERLINED BOLD</b></u> for headers (e.g., <u><b>1. CLINICAL TERMS</b></u>).
-        3. **Definitions**: Use <b>bold</b> for the term and <code>monospace</code> for the explanation.
-            Example: <b>URTI</b>: <code>Upper Respiratory Tract Infection</code>.
-        4. **Highlights**: use <code>code tags</code> for the numbers.
+        STRICT FORMATTING RULES:
+        1. START with the disclaimer: <i><b>DISCLAIMER: This is an AI-generated summary for informational purposes only. It is not medical advice. Please consult a doctor.</b></i>
+        2. For section headers, use: <u><b>1. SECTION NAME</b></u>
+        3. For definitions, use: <b>Term Name</b>: <code>Simple Explanation</code>
+        4. For numerical values/results, always wrap them in <code>tags</code>.
+        5. DO NOT use any Markdown (no **, no __, no #, no *).
+        6. Use ⚠️ for values outside normal ranges.
+
+        Example Structure:
+        <u><b>1. SUMMARY OF TERMS</b></u>
+        • <b>RBS</b>: <code>Random Blood Sugar</code>. Your level was <code>165</code> ⚠️.
         
         STRICT: Do not diagnose. Use a supportive, clear tone.
-        Include disclaimer: 'AI-generated summary. Not medical advice.'
         """
 
         # 3. Model Logic (NOW CORRECTLY INDENTED)
@@ -187,12 +192,8 @@ def home():
                 <div class="feature-item">Checks lab values for range</div>
                 <div class="feature-item">Completely private & secure</div>
             </div>
-
-            <a href="https://t.me/med_clear_bot" class="btn">Start Chat on Telegram</a>
-
-            <a href="https://t.me/YOUR_BOT_USERNAME" class="btn">🚀 Start Chat on Telegram</a>
-
-            <a href="https://t.me/YOUR_BOT_USERNAME?start=welcome" class="btn">🚀 Start Chat on Telegram</a>
+                        
+            <a href="https://t.me/med_clear_bot?start=welcome" class="btn">🚀 Start Chat on Telegram</a>
             
             <div class="footer">
                 <strong>Disclaimer:</strong> AI-generated summaries are for informational purposes only and do not replace professional medical advice. Always consult a physician.
