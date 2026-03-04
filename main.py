@@ -38,10 +38,11 @@ def handle_medical_image(message):
         # 1. Download image from Telegram
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
-        img = Image.open(io.BytesIO(downloaded_file))
+        
+        # Convert to bytes for Gemini (more stable than PIL object)
+        img_bytes = downloaded_file 
 
         # 2. Configure the "Brain"
-        # We use HIGH resolution for OCR and MEDIUM thinking for medical logic
         config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(
                 thinking_level=types.ThinkingLevel.MEDIUM
@@ -61,21 +62,30 @@ def handle_medical_image(message):
         Include disclaimer: 'AI-generated summary. Not medical advice.'
         """
 
-        # 3. Call Gemini 3 Flash
-        response = client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=[prompt, img],
-            config=config
-        )
+        # 3. Model Logic (NOW CORRECTLY INDENTED)
+        try:
+            # Try the high-quality OCR model first
+            response = client.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=[prompt, types.Part.from_bytes(data=img_bytes, mime_type='image/jpeg')],
+                config=config
+            )
+        except Exception as e:
+            # If Gemini 3 is busy (503), try the stable 2.0 version
+            print(f"Gemini 3 busy/error: {e}. Falling back to 2.0...")
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[prompt, types.Part.from_bytes(data=img_bytes, mime_type='image/jpeg')],
+                # Note: 2.0-flash may ignore thinking_level, but config is still valid
+                config=config
+            )
 
         # 4. Send result back
         bot.reply_to(message, response.text, parse_mode=None)
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Oops! Something went wrong: {str(e)}")
-
-print("🚀 Med-Clear Bot is live! Send a photo of a medical doc to your Telegram bot.")
-
+        print(f"General Error: {e}")
+        bot.reply_to(message, "❌ Oops! Something went wrong. Please try again in a moment.")
 # 2. THE RENDER KEEP-ALIVE LOGIC
 
 server = Flask('')
