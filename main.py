@@ -99,7 +99,104 @@ server = Flask('')
 
 @server.route('/')
 def home():
-    return "Med-Clear is running!"
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Med-Clear | AI Medical Jargon Interpreter</title>
+        <style>
+            * { box-sizing: border-box; }
+            body { 
+                font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+                margin: 0; 
+                display: flex; 
+                align-items: center; 
+                justify-content: center; 
+                min-height: 100vh; 
+                background: linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 100%);
+                color: #1e293b;
+            }
+            .container { 
+                background: white; 
+                padding: 40px 30px; 
+                border-radius: 24px; 
+                box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+                max-width: 450px; 
+                width: 90%; 
+                text-align: center;
+            }
+            .icon-circle {
+                width: 80px;
+                height: 80px;
+                background: #0088cc;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin: 0 auto 20px;
+                font-size: 40px;
+            }
+            h1 { font-size: 2rem; margin-bottom: 12px; color: #0f172a; }
+            p { font-size: 1.1rem; color: #64748b; line-height: 1.5; margin-bottom: 30px; }
+            .btn { 
+                background: #0088cc; 
+                color: white; 
+                padding: 18px 40px; 
+                text-decoration: none; 
+                border-radius: 12px; 
+                font-weight: 700; 
+                font-size: 1.1rem; 
+                display: block;
+                transition: all 0.2s ease;
+                box-shadow: 0 4px 6px rgba(0, 136, 204, 0.2);
+            }
+            .btn:hover { 
+                background: #0077b5; 
+                transform: translateY(-2px);
+                box-shadow: 0 10px 15px rgba(0, 136, 204, 0.3);
+            }
+            .features {
+                text-align: left;
+                margin: 30px 0;
+                font-size: 0.95rem;
+                color: #475569;
+            }
+            .feature-item { margin-bottom: 8px; display: flex; align-items: center; }
+            .feature-item::before { content: '✅'; margin-right: 10px; }
+            .footer { 
+                margin-top: 25px; 
+                padding-top: 20px; 
+                border-top: 1px solid #f1f5f9; 
+                font-size: 0.75rem; 
+                color: #94a3b8; 
+                line-height: 1.4;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="icon-circle">🔍</div>
+            <h1>Med-Clear</h1>
+            <p>Understand your medical reports in plain English.</p>
+            
+            <div class="features">
+                <div class="feature-item">Powered by Gemini 3.1 Flash-Lite</div>
+                <div class="feature-item">Simplifies complex clinical terms</div>
+                <div class="feature-item">Checks lab values for range</div>
+                <div class="feature-item">Completely private & secure</div>
+            </div>
+
+            <a href="https://t.me/Med-Clear" class="btn">Start Chat on Telegram</a>
+            
+            <div class="footer">
+                <strong>Disclaimer:</strong> AI-generated summaries are for informational purposes only and do not replace professional medical advice. Always consult a physician.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
 def run():
     # Render's dynamic port
