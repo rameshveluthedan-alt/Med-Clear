@@ -73,7 +73,7 @@ def handle_medical_image(message):
         try:
             # Try the high-quality OCR model first
             response = client.models.generate_content(
-                model="gemini-3-flash-preview",
+                model="gemini-3.1-flash-lite-preview",
                 contents=[prompt, types.Part.from_bytes(data=img_bytes, mime_type='image/jpeg')],
                 config=config
             )
@@ -189,7 +189,7 @@ def home():
             </div>
 
             <a href="https://t.me/med_clear_bot" class="btn">Start Chat on Telegram</a>
-            
+
             <a href="https://t.me/YOUR_BOT_USERNAME" class="btn">🚀 Start Chat on Telegram</a>
 
             <a href="https://t.me/YOUR_BOT_USERNAME?start=welcome" class="btn">🚀 Start Chat on Telegram</a>
