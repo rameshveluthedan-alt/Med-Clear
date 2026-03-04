@@ -188,7 +188,7 @@ def home():
                 <div class="feature-item">Completely private & secure</div>
             </div>
 
-            <a href="https://t.me/Med-Clear" class="btn">Start Chat on Telegram</a>
+            <a href="https://t.me/med_clear_bot" class="btn">Start Chat on Telegram</a>
             
             <div class="footer">
                 <strong>Disclaimer:</strong> AI-generated summaries are for informational purposes only and do not replace professional medical advice. Always consult a physician.
