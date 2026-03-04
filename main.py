@@ -29,7 +29,7 @@ def send_welcome(message):
         "3. I will simplify the complex terms and give you questions for your doctor.\n\n"
         "⚠️ *Disclaimer: I am an AI, not a doctor. My summaries are for informational purposes only and do not replace professional medical advice.*"
     )
-    bot.reply_to(message, welcome_text, parse_mode="Markdown")
+    bot.reply_to(message, welcome_text, parse_mode="HTML")
 @bot.message_handler(content_types=['photo'])
 def handle_medical_image(message):
     try:
@@ -57,6 +57,13 @@ def handle_medical_image(message):
         2. Explain what they are in simple, non-scary language.
         3. Flag any values with '⚠️' if they seem outside a standard range.
         4. Provide 3 questions for the user to ask their doctor.
+        Format your response using these HTML rules:
+
+        1. **Disclaimer**: Wrap the disclaimer in <i><b>bold italics</b></i> at the very top.
+        2. **Sections**: Use <u><b>UNDERLINED BOLD</b></u> for headers (e.g., <u><b>1. CLINICAL TERMS</b></u>).
+        3. **Definitions**: Use <b>bold</b> for the term and <code>monospace</code> for the explanation.
+            Example: <b>URTI</b>: <code>Upper Respiratory Tract Infection</code>.
+        4. **Highlights**: use <code>code tags</code> for the numbers.
         
         STRICT: Do not diagnose. Use a supportive, clear tone.
         Include disclaimer: 'AI-generated summary. Not medical advice.'
