@@ -145,7 +145,7 @@ def home():
                 color: white; 
                 padding: 18px 40px; 
                 text-decoration: none; 
-                border-radius: 12px; 
+                border-radius: 12px;    
                 font-weight: 700; 
                 font-size: 1.1rem; 
                 display: block;
@@ -189,6 +189,10 @@ def home():
             </div>
 
             <a href="https://t.me/med_clear_bot" class="btn">Start Chat on Telegram</a>
+            
+            <a href="https://t.me/YOUR_BOT_USERNAME" class="btn">🚀 Start Chat on Telegram</a>
+
+            <a href="https://t.me/YOUR_BOT_USERNAME?start=welcome" class="btn">🚀 Start Chat on Telegram</a>
             
             <div class="footer">
                 <strong>Disclaimer:</strong> AI-generated summaries are for informational purposes only and do not replace professional medical advice. Always consult a physician.
