@@ -98,6 +98,73 @@ def handle_medical_image(message):
     except Exception as e:
         print(f"General Error: {e}")
         bot.reply_to(message, "❌ Oops! Something went wrong. Please try again in a moment.")
+
+
+# 2. The PDF Message Handler
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    # Security Check: Only process PDFs
+    if message.document.mime_type != 'application/pdf':
+        return bot.reply_to(message, "⚠️ Please send medical reports as a PDF or a Photo.")
+
+    status_msg = bot.reply_to(message, "📄 Reading your PDF report... please wait.")
+    
+    try:
+        # Step A: Download from Telegram
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+
+        # Step B: Prepare Gemini Part
+        pdf_part = types.Part.from_bytes(
+            data=downloaded_file, 
+            mime_type='application/pdf'
+        )
+        # 1. Define the PDF-specific prompt (top of your file)
+        PDF_PROMPT = """
+        You are a Medical Jargon Interpreter. 
+        Analyze the attached medical document/prescription:
+        1. Extract names of labs or medications.
+        2. Explain what they are in simple, non-scary language.
+        3. Flag any values with '⚠️' if they seem outside a standard range.
+        4. Provide 3 questions for the user to ask their doctor.
+        Format your response using ONLY these HTML rules:
+
+        STRICT FORMATTING RULES:
+        1. START with the disclaimer: <i><b>DISCLAIMER: This is an AI-generated summary for informational purposes only. It is not medical advice. Please consult a doctor.</b></i>
+        2. For section headers, use: <u><b>1. SECTION NAME</b></u>
+        3. For definitions, use: <b>Term Name</b>: <code>Simple Explanation</code>
+        4. For numerical values/results, always wrap them in <code>tags</code>.
+        5. DO NOT use any Markdown (no **, no __, no #, no *).
+        6. Use ⚠️ for values outside normal ranges.
+
+        Example Structure:
+        <u><b>1. SUMMARY OF TERMS</b></u>
+        • <b>RBS</b>: <code>Random Blood Sugar</code>. Your level was <code>165</code> ⚠️.
+        
+        STRICT: Do not diagnose. Use a supportive, clear tone.
+        """
+        # Step C: Try Gemini 3.1 Flash-Lite (Main)
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite-preview",
+                contents=[PDF_PROMPT, pdf_part],
+                config=config
+            )
+        except Exception as e:
+            # Step D: Fallback to Gemini 2.0 if 3.1 fails (Tier 1 insurance)
+            print(f"3.1 PDF Failed, falling back: {e}")
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[PDF_PROMPT, pdf_part],
+                config=config
+            )
+
+        # Step E: Send result
+        bot.edit_message_text(response.text, message.chat.id, status_msg.message_id, parse_mode="HTML")
+
+    except Exception as e:
+        print(f"Critical PDF Error: {e}")
+        bot.edit_message_text("❌ I had trouble reading that PDF. Is it password protected?", message.chat.id, status_msg.message_id)        
 # 2. THE RENDER KEEP-ALIVE LOGIC
 
 server = Flask('')
