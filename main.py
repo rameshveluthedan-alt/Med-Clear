@@ -94,7 +94,7 @@ _GEMINI_CONFIG = types.GenerateContentConfig(
     media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
 )
 
-_MODEL_PRIMARY  = "gemini-2.5-flash-preview-05-20"   # best OCR + thinking
+_MODEL_PRIMARY  = "gemini-3.1-flash-lite-preview"   # best OCR + thinking
 _MODEL_FALLBACK = "gemini-2.0-flash"                 # stable backup
 
 
