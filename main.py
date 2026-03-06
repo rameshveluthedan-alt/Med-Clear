@@ -1,285 +1,501 @@
+"""
+Med-Clear Telegram Bot — Refactored
+====================================
+Tech Stack : pyTelegramBotAPI + Flask + Google Gemini
+Hosting    : Render Free Tier / Google Cloud Run ready
+Author note: All 5 fine-tuning objectives addressed (see README below)
+"""
+
 import os
-import io
+import re
+import time
+import logging
+import threading
+
 import telebot
-from PIL import Image
+from flask import Flask
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from flask import Flask
-from threading import Thread
 
-# Load secrets
+# ──────────────────────────────────────────────────────────────────────────────
+# 0.  BOOTSTRAP
+# ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
-BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
-# Initialize Clients
-bot = telebot.TeleBot(BOT_TOKEN)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+log = logging.getLogger("med-clear")
+
+# Environment variables (works on Render AND Cloud Run)
+BOT_TOKEN  = os.environ["TELEGRAM_TOKEN"]        # raises KeyError early — fail fast
+GEMINI_KEY = os.environ["GEMINI_API_KEY"]
+
+bot    = telebot.TeleBot(BOT_TOKEN, threaded=True)
 client = genai.Client(api_key=GEMINI_KEY)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 1.  SHARED PROMPT & GEMINI HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
 
-@bot.message_handler(commands=['start', 'help'])
+ANALYSIS_PROMPT = """\
+You are Med-Clear, a friendly Medical Jargon Interpreter.
+Analyze the attached medical document (image or PDF) and do the following:
+  1. Extract every lab test, medication, diagnosis code, or medical term.
+  2. Explain each item in plain language a patient can understand.
+  3. For numerical results, flag with ⚠️ if outside the standard adult reference range.
+  4. List 3 specific questions the patient should ask their doctor.
+
+════════════════════════════════════════
+STRICT OUTPUT FORMAT — HTML ONLY
+You MUST follow every rule below. Violating even one rule makes the response unusable.
+════════════════════════════════════════
+RULE 1 — DISCLAIMER (first line, always):
+<i><b>DISCLAIMER: This is an AI-generated summary for informational purposes only. It is NOT medical advice. Always consult a qualified doctor.</b></i>
+
+RULE 2 — SECTION HEADERS:
+<u><b>1. SECTION TITLE</b></u>
+
+RULE 3 — TERM DEFINITIONS:
+<b>Term Name</b>: <code>Plain-language explanation</code>
+
+RULE 4 — NUMERICAL VALUES:
+Always wrap every number and its unit inside <code> tags.
+Example: Your result was <code>6.8 mmol/L</code> ⚠️ (above the normal range of <code>3.9–5.5 mmol/L</code>).
+
+RULE 5 — BANNED FORMATTING:
+Do NOT use Markdown. No **, no __, no #, no *, no backtick outside <code>.
+
+RULE 6 — NO DIAGNOSIS:
+Never state a diagnosis. Use "may suggest", "can indicate", or "your doctor will interpret".
+
+RULE 7 — MULTI-PAGE / TABLE DOCUMENTS:
+Process every page and every table row. Do not skip values.
+
+Example output skeleton (follow exactly):
+<i><b>DISCLAIMER: ...</b></i>
+
+<u><b>1. SUMMARY OF FINDINGS</b></u>
+• <b>RBS (Random Blood Sugar)</b>: <code>Blood sugar measured at any time of day</code>. Your result: <code>165 mg/dL</code> ⚠️ (normal fasting: <code>70–99 mg/dL</code>).
+
+<u><b>2. MEDICATIONS / PRESCRIPTIONS</b></u>
+• <b>Metformin 500 mg</b>: <code>A medication commonly used to manage blood sugar levels in Type 2 diabetes.</code>
+
+<u><b>3. QUESTIONS TO ASK YOUR DOCTOR</b></u>
+1. ...
+2. ...
+3. ...
+"""
+
+_GEMINI_CONFIG = types.GenerateContentConfig(
+    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MEDIUM),
+    media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+)
+
+_MODEL_PRIMARY  = "gemini-3.1-flash-lite-preview"   # best OCR + thinking
+_MODEL_FALLBACK = "gemini-2.0-flash"                 # stable backup
+
+
+def _gemini_generate(parts: list) -> str:
+    """
+    Two-tier Gemini call with retry logic.
+    Returns the raw response text (HTML formatted by the model).
+    """
+    for attempt, model in enumerate((_MODEL_PRIMARY, _MODEL_FALLBACK), start=1):
+        try:
+            log.info("Gemini attempt %d — model: %s", attempt, model)
+            response = client.models.generate_content(
+                model=model,
+                contents=parts,
+                config=_GEMINI_CONFIG,
+            )
+            return response.text
+        except Exception as exc:
+            log.warning("Model %s failed (attempt %d): %s", model, attempt, exc)
+            if attempt == 1:
+                time.sleep(1.5)   # brief pause before fallback
+    raise RuntimeError("Both Gemini models failed — see logs for details.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2.  HTML SANITIZER  (Objective 1 — strict formatting)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Tags that Telegram's HTML parser actually supports
+_ALLOWED_TAGS = {"b", "i", "u", "s", "code", "pre", "a"}
+
+def _strip_markdown(text: str) -> str:
+    """
+    Belt-and-suspenders: remove residual Markdown that Gemini might sneak in
+    even after explicit instructions.
+    """
+    # Bold/italic asterisks
+    text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text, flags=re.DOTALL)
+    # Bold/italic underscores
+    text = re.sub(r"_{1,2}(.+?)_{1,2}", r"\1", text, flags=re.DOTALL)
+    # ATX headers (#, ##, ###)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Inline code backticks NOT inside <code> (rare but possible)
+    text = re.sub(r"(?<!<code>)`([^`]+)`(?!</code>)", r"<code>\1</code>", text)
+    return text
+
+
+def _ensure_disclaimer(text: str) -> str:
+    """If the model forgot the disclaimer, prepend it."""
+    disclaimer = (
+        "<i><b>DISCLAIMER: This is an AI-generated summary for informational "
+        "purposes only. It is NOT medical advice. Always consult a qualified "
+        "doctor.</b></i>\n\n"
+    )
+    if "<i><b>DISCLAIMER" not in text:
+        text = disclaimer + text
+    return text
+
+
+def sanitize_for_telegram(text: str) -> str:
+    """Full pipeline: strip Markdown → guarantee disclaimer."""
+    text = _strip_markdown(text)
+    text = _ensure_disclaimer(text)
+    return text.strip()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3.  SAFE REPLY HELPERS  (Objective 3 — error handling / chat hygiene)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_MAX_MSG_LEN = 4096   # Telegram hard limit
+
+
+def _send_long(chat_id: int, text: str, reply_to: int | None = None) -> None:
+    """Split long responses and send as multiple messages."""
+    chunks = [text[i : i + _MAX_MSG_LEN] for i in range(0, len(text), _MAX_MSG_LEN)]
+    for idx, chunk in enumerate(chunks):
+        kwargs = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+        if idx == 0 and reply_to:
+            kwargs["reply_to_message_id"] = reply_to
+        try:
+            bot.send_message(**kwargs)
+        except telebot.apihelper.ApiTelegramException as e:
+            log.error("Telegram send error: %s", e)
+            # Retry once without parse_mode in case of malformed HTML
+            bot.send_message(chat_id=chat_id, text=chunk)
+
+
+def _edit_or_send(chat_id: int, message_id: int, text: str) -> None:
+    """Edit an existing message; fall back to new message if edit fails."""
+    try:
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.warning("edit_message_text failed (%s), sending new message.", e)
+        _send_long(chat_id, text)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4.  COMMAND HANDLERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
     welcome_text = (
-        "👋 **Welcome to Med-Clear!**\n\n"
-        "I am your AI Medical Jargon Interpreter, powered by Gemini 3 Flash.\n\n"
-        "📸 **How to use me:**\n"
+        "👋 <b>Welcome to Med-Clear!</b>\n\n"
+        "I am your AI Medical Jargon Interpreter, powered by Gemini.\n\n"
+        "📸 <u><b>How to use me:</b></u>\n"
         "1. Take a clear photo of a medical report, lab result, or prescription.\n"
-        "2. Send it to this chat.\n"
-        "3. I will simplify the complex terms and give you questions for your doctor.\n\n"
-        "⚠️ *Disclaimer: I am an AI, not a doctor. My summaries are for informational purposes only and do not replace professional medical advice.*"
+        "2. Send it here — or upload a <b>PDF</b>.\n"
+        "3. I will explain complex terms in plain language and give you questions "
+        "for your doctor.\n\n"
+        "💬 You can also <b>type a question</b> about medical terminology.\n\n"
+        "<i>⚠️ I am an AI assistant, not a licensed physician. My summaries are "
+        "for informational purposes only and do not replace professional medical advice.</i>"
     )
-    bot.reply_to(message, welcome_text, parse_mode="Markdown")
-@bot.message_handler(content_types=['photo'])
-def handle_medical_image(message):
+    bot.reply_to(message, welcome_text, parse_mode="HTML")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5.  PHOTO HANDLER  (Objective 2 — OCR)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(content_types=["photo"])
+def handle_photo(message):
+    status = bot.reply_to(message, "🔍 Analyzing your medical image…")
     try:
-        bot.reply_to(message, "🔍 Scanning your document with Gemini 3 Flash...")
+        file_info      = bot.get_file(message.photo[-1].file_id)
+        img_bytes      = bot.download_file(file_info.file_path)
+        img_part       = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
-        # 1. Download image from Telegram
-        file_info = bot.get_file(message.photo[-1].file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        
-        # Convert to bytes for Gemini (more stable than PIL object)
-        img_bytes = downloaded_file 
+        raw  = _gemini_generate([ANALYSIS_PROMPT, img_part])
+        text = sanitize_for_telegram(raw)
 
-        # 2. Configure the "Brain"
-        config = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(
-                thinking_level=types.ThinkingLevel.MEDIUM
-            ),
-            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH
+        _edit_or_send(message.chat.id, status.message_id, text)
+
+    except Exception as exc:
+        log.error("handle_photo error: %s", exc)
+        _edit_or_send(
+            message.chat.id, status.message_id,
+            "❌ Something went wrong while analyzing your image. Please try again."
         )
 
-        prompt = """
-        You are a Medical Jargon Interpreter. 
-        Analyze the attached medical document/prescription:
-        1. Extract names of labs or medications.
-        2. Explain what they are in simple, non-scary language.
-        3. Flag any values with '⚠️' if they seem outside a standard range.
-        4. Provide 3 questions for the user to ask their doctor.
-        Format your response using ONLY these HTML rules:
 
-        STRICT FORMATTING RULES:
-        1. START with the disclaimer: <i><b>DISCLAIMER: This is an AI-generated summary for informational purposes only. It is not medical advice. Please consult a doctor.</b></i>
-        2. For section headers, use: <u><b>1. SECTION NAME</b></u>
-        3. For definitions, use: <b>Term Name</b>: <code>Simple Explanation</code>
-        4. For numerical values/results, always wrap them in <code>tags</code>.
-        5. DO NOT use any Markdown (no **, no __, no #, no *).
-        6. Use ⚠️ for values outside normal ranges.
+# ──────────────────────────────────────────────────────────────────────────────
+# 6.  DOCUMENT HANDLER  (Objective 2 — PDF + image-as-file)
+# ──────────────────────────────────────────────────────────────────────────────
 
-        Example Structure:
-        <u><b>1. SUMMARY OF TERMS</b></u>
-        • <b>RBS</b>: <code>Random Blood Sugar</code>. Your level was <code>165</code> ⚠️.
-        
-        STRICT: Do not diagnose. Use a supportive, clear tone.
-        """
-
-        # 3. Model Logic (NOW CORRECTLY INDENTED)
-        try:
-            # Try the high-quality OCR model first
-            response = client.models.generate_content(
-                model="gemini-3.1-flash-lite-preview",
-                contents=[prompt, types.Part.from_bytes(data=img_bytes, mime_type='image/jpeg')],
-                config=config
-            )
-        except Exception as e:
-            # If Gemini 3 is busy (503), try the stable 2.0 version
-            print(f"Gemini 3 busy/error: {e}. Falling back to 2.0...")
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[prompt, types.Part.from_bytes(data=img_bytes, mime_type='image/jpeg')],
-                # Note: 2.0-flash may ignore thinking_level, but config is still valid
-                config=config
-            )
-
-        # 4. Send result back
-        bot.reply_to(message, response.text, parse_mode="HTML")
-
-    except Exception as e:
-        print(f"General Error: {e}")
-        bot.reply_to(message, "❌ Oops! Something went wrong. Please try again in a moment.")
+_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 
 
-# 2. The PDF Message Handler
-@bot.message_handler(content_types=['document'])
+@bot.message_handler(content_types=["document"])
 def handle_document(message):
-    # Security Check: Only process PDFs
-    if message.document.mime_type != 'application/pdf':
-        return bot.reply_to(message, "⚠️ Please send medical reports as a PDF or a Photo.")
+    doc       = message.document
+    mime_type = doc.mime_type or ""
 
-    status_msg = bot.reply_to(message, "📄 Reading your PDF report... please wait.")
-    
-    try:
-        # Step A: Download from Telegram
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-
-        # Step B: Prepare Gemini Part
-        pdf_part = types.Part.from_bytes(
-            data=downloaded_file, 
-            mime_type='application/pdf'
-        )
-        # 1. Define the PDF-specific prompt (top of your file)
-        PDF_PROMPT = """
-        You are a Medical Jargon Interpreter. 
-        Analyze the attached medical document/prescription:
-        1. Extract names of labs or medications.
-        2. Explain what they are in simple, non-scary language.
-        3. Flag any values with '⚠️' if they seem outside a standard range.
-        4. Provide 3 questions for the user to ask their doctor.
-        Format your response using ONLY these HTML rules:
-
-        STRICT FORMATTING RULES:
-        1. START with the disclaimer: <i><b>DISCLAIMER: This is an AI-generated summary for informational purposes only. It is not medical advice. Please consult a doctor.</b></i>
-        2. For section headers, use: <u><b>1. SECTION NAME</b></u>
-        3. For definitions, use: <b>Term Name</b>: <code>Simple Explanation</code>
-        4. For numerical values/results, always wrap them in <code>tags</code>.
-        5. DO NOT use any Markdown (no **, no __, no #, no *).
-        6. Use ⚠️ for values outside normal ranges.
-
-        Example Structure:
-        <u><b>1. SUMMARY OF TERMS</b></u>
-        • <b>RBS</b>: <code>Random Blood Sugar</code>. Your level was <code>165</code> ⚠️.
-        
-        STRICT: Do not diagnose. Use a supportive, clear tone.
-        """
-        # Step C: Try Gemini 3.1 Flash-Lite (Main)
+    # ── Route: image sent as a file ──────────────────────────────────────────
+    if mime_type in _IMAGE_MIME_TYPES:
+        status = bot.reply_to(message, "🔍 Analyzing your medical image…")
         try:
-            response = client.models.generate_content(
-                model="gemini-3.1-flash-lite-preview",
-                contents=[PDF_PROMPT, pdf_part],
-                config=config
+            file_info = bot.get_file(doc.file_id)
+            img_bytes = bot.download_file(file_info.file_path)
+            img_part  = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+
+            raw  = _gemini_generate([ANALYSIS_PROMPT, img_part])
+            text = sanitize_for_telegram(raw)
+            _edit_or_send(message.chat.id, status.message_id, text)
+        except Exception as exc:
+            log.error("handle_document (image) error: %s", exc)
+            _edit_or_send(
+                message.chat.id, status.message_id,
+                "❌ Could not analyze that image file. Please try again."
             )
-        except Exception as e:
-            # Step D: Fallback to Gemini 2.0 if 3.1 fails (Tier 1 insurance)
-            print(f"3.1 PDF Failed, falling back: {e}")
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[PDF_PROMPT, pdf_part],
-                config=config
+        return
+
+    # ── Route: PDF ───────────────────────────────────────────────────────────
+    if mime_type == "application/pdf":
+        status = bot.reply_to(message, "📄 Reading your PDF report… this may take a moment.")
+        try:
+            file_info  = bot.get_file(doc.file_id)
+            pdf_bytes  = bot.download_file(file_info.file_path)
+            pdf_part   = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+
+            raw  = _gemini_generate([ANALYSIS_PROMPT, pdf_part])
+            text = sanitize_for_telegram(raw)
+            _edit_or_send(message.chat.id, status.message_id, text)
+        except Exception as exc:
+            log.error("handle_document (PDF) error: %s", exc)
+            _edit_or_send(
+                message.chat.id, status.message_id,
+                "❌ I had trouble reading that PDF.\n\n"
+                "Possible reasons:\n"
+                "• The file is password-protected\n"
+                "• The scan quality is very low\n"
+                "• The file is corrupted\n\n"
+                "Try sending a clear <b>photo</b> of each page instead.",
             )
+        return
 
-        # Step E: Send result
-        bot.edit_message_text(response.text, message.chat.id, status_msg.message_id, parse_mode="HTML")
+    # ── Unsupported type ─────────────────────────────────────────────────────
+    bot.reply_to(
+        message,
+        "⚠️ Unsupported file type. Please send your report as a <b>PDF</b> or a <b>photo</b>.",
+        parse_mode="HTML",
+    )
 
-    except Exception as e:
-        print(f"Critical PDF Error: {e}")
-        bot.edit_message_text("❌ I had trouble reading that PDF. Is it password protected?", message.chat.id, status_msg.message_id)        
-# 2. THE RENDER KEEP-ALIVE LOGIC
 
-server = Flask('')
+# ──────────────────────────────────────────────────────────────────────────────
+# 7.  TEXT / FOLLOW-UP Q&A HANDLER  (Objective 5 — guardrails)
+# ──────────────────────────────────────────────────────────────────────────────
 
-@server.route('/')
+_TEXT_SYSTEM = """\
+You are Med-Clear, a Medical Jargon Interpreter.
+A user is asking a follow-up question about medical terminology or their report.
+
+STRICT RULES:
+1. NEVER provide a diagnosis or say "you have [condition]".
+2. ALWAYS use hedging language: "may suggest", "can indicate", "your doctor will determine".
+3. Format with Telegram HTML only (no Markdown).
+4. End EVERY response with:
+<i><b>Remember: This information is for educational purposes only. Please consult your doctor for personalized medical advice.</b></i>
+"""
+
+@bot.message_handler(func=lambda m: m.content_type == "text")
+def handle_text(message):
+    user_text = message.text.strip()
+    if not user_text or user_text.startswith("/"):
+        return
+
+    status = bot.reply_to(message, "💬 Looking that up for you…")
+    try:
+        raw = _gemini_generate([
+            {"role": "user", "parts": [_TEXT_SYSTEM + "\n\nUser question: " + user_text]}
+        ])
+        text = sanitize_for_telegram(raw)
+        _edit_or_send(message.chat.id, status.message_id, text)
+    except Exception as exc:
+        log.error("handle_text error: %s", exc)
+        _edit_or_send(
+            message.chat.id, status.message_id,
+            "❌ I couldn't process that question. Please rephrase and try again."
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8.  FLASK KEEP-ALIVE  (Objective 4 — Cloud Run ready)
+# ──────────────────────────────────────────────────────────────────────────────
+
+server = Flask(__name__)
+
+
+@server.route("/")
 def home():
-    return """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Med-Clear | AI Medical Jargon Interpreter</title>
-        <style>
-            * { box-sizing: border-box; }
-            body { 
-                font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
-                margin: 0; 
-                display: flex; 
-                align-items: center; 
-                justify-content: center; 
-                min-height: 100vh; 
-                background: linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 100%);
-                color: #1e293b;
-            }
-            .container { 
-                background: white; 
-                padding: 40px 30px; 
-                border-radius: 24px; 
-                box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-                max-width: 450px; 
-                width: 90%; 
-                text-align: center;
-            }
-            .icon-circle {
-                width: 80px;
-                height: 80px;
-                background: #0088cc;
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                margin: 0 auto 20px;
-                font-size: 40px;
-            }
-            h1 { font-size: 2rem; margin-bottom: 12px; color: #0f172a; }
-            p { font-size: 1.1rem; color: #64748b; line-height: 1.5; margin-bottom: 30px; }
-            .btn { 
-                background: #0088cc; 
-                color: white; 
-                padding: 18px 40px; 
-                text-decoration: none; 
-                border-radius: 12px;    
-                font-weight: 700; 
-                font-size: 1.1rem; 
-                display: block;
-                transition: all 0.2s ease;
-                box-shadow: 0 4px 6px rgba(0, 136, 204, 0.2);
-            }
-            .btn:hover { 
-                background: #0077b5; 
-                transform: translateY(-2px);
-                box-shadow: 0 10px 15px rgba(0, 136, 204, 0.3);
-            }
-            .features {
-                text-align: left;
-                margin: 30px 0;
-                font-size: 0.95rem;
-                color: #475569;
-            }
-            .feature-item { margin-bottom: 8px; display: flex; align-items: center; }
-            .feature-item::before { content: '✅'; margin-right: 10px; }
-            .footer { 
-                margin-top: 25px; 
-                padding-top: 20px; 
-                border-top: 1px solid #f1f5f9; 
-                font-size: 0.75rem; 
-                color: #94a3b8; 
-                line-height: 1.4;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="icon-circle">🔍</div>
-            <h1>Med-Clear</h1>
-            <p>Understand your medical reports in plain English.</p>
-            
-            <div class="features">
-                <div class="feature-item">Powered by Gemini 3.1 Flash-Lite</div>
-                <div class="feature-item">Simplifies complex clinical terms</div>
-                <div class="feature-item">Checks lab values for range</div>
-                <div class="feature-item">Completely private & secure</div>
-            </div>
-                        
-            <a href="https://t.me/med_clear_bot?start=welcome" class="btn">🚀 Start Chat on Telegram</a>
-            
-            <div class="footer">
-                <strong>Disclaimer:</strong> AI-generated summaries are for informational purposes only and do not replace professional medical advice. Always consult a physician.
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Med-Clear | AI Medical Jargon Interpreter</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #e0f2fe 0%, #f0fdf4 100%);
+      color: #1e293b;
+      padding: 20px;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 24px;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.12);
+      max-width: 480px;
+      width: 100%;
+      padding: 48px 36px 40px;
+      text-align: center;
+    }
+    .logo {
+      width: 88px; height: 88px;
+      background: linear-gradient(135deg, #0088cc, #00b4d8);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 42px;
+      margin: 0 auto 24px;
+      box-shadow: 0 8px 24px rgba(0,136,204,0.3);
+    }
+    h1 { font-size: 2.2rem; font-weight: 800; color: #0f172a; margin-bottom: 10px; }
+    .tagline { font-size: 1.05rem; color: #64748b; line-height: 1.6; margin-bottom: 32px; }
+    .features {
+      background: #f8fafc;
+      border-radius: 16px;
+      padding: 20px 24px;
+      text-align: left;
+      margin-bottom: 32px;
+    }
+    .features h2 { font-size: 0.8rem; font-weight: 700; text-transform: uppercase;
+                   letter-spacing: .08em; color: #94a3b8; margin-bottom: 14px; }
+    .feature {
+      display: flex; align-items: center; gap: 12px;
+      font-size: 0.95rem; color: #334155;
+      padding: 6px 0;
+    }
+    .feature-icon { font-size: 1.2rem; flex-shrink: 0; }
+    .btn {
+      display: block;
+      background: linear-gradient(135deg, #0088cc, #00b4d8);
+      color: #ffffff;
+      text-decoration: none;
+      padding: 18px 32px;
+      border-radius: 14px;
+      font-weight: 700;
+      font-size: 1.05rem;
+      transition: transform 0.18s, box-shadow 0.18s;
+      box-shadow: 0 6px 20px rgba(0,136,204,0.35);
+    }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 12px 28px rgba(0,136,204,0.4); }
+    .disclaimer {
+      margin-top: 28px;
+      padding-top: 22px;
+      border-top: 1px solid #f1f5f9;
+      font-size: 0.72rem;
+      color: #94a3b8;
+      line-height: 1.5;
+    }
+    .status-dot {
+      display: inline-block; width: 8px; height: 8px;
+      background: #22c55e; border-radius: 50%;
+      animation: pulse 2s infinite;
+      margin-right: 6px; vertical-align: middle;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🔍</div>
+    <h1>Med-Clear</h1>
+    <p class="tagline">Understand your medical reports in plain English — instantly.</p>
 
-def run():
-    # Render's dynamic port
+    <div class="features">
+      <h2>What I can do</h2>
+      <div class="feature"><span class="feature-icon">📸</span> Analyze photos of lab reports &amp; prescriptions</div>
+      <div class="feature"><span class="feature-icon">📄</span> Process PDF documents (multi-page &amp; tables)</div>
+      <div class="feature"><span class="feature-icon">🔬</span> Flag out-of-range lab values automatically</div>
+      <div class="feature"><span class="feature-icon">💬</span> Answer follow-up medical terminology questions</div>
+      <div class="feature"><span class="feature-icon">🔒</span> Private &amp; secure — no data stored</div>
+    </div>
+
+    <a href="https://t.me/med_clear_bot?start=welcome" class="btn">🚀 Open Med-Clear on Telegram</a>
+
+    <p class="disclaimer">
+      <span class="status-dot"></span><strong>Bot is online</strong><br><br>
+      <strong>Medical Disclaimer:</strong> Med-Clear provides AI-generated summaries
+      for informational purposes only. It is not a substitute for professional medical
+      advice, diagnosis, or treatment. Always consult a qualified healthcare provider.
+    </p>
+  </div>
+</body>
+</html>"""
+
+
+@server.route("/health")
+def health():
+    """Health-check endpoint for Cloud Run / Render."""
+    return {"status": "ok", "service": "med-clear"}, 200
+
+
+def _run_flask():
     port = int(os.environ.get("PORT", 10000))
-    server.run(host='0.0.0.0', port=port)
+    # use_reloader=False is critical — avoids double-start in threaded environments
+    server.run(host="0.0.0.0", port=port, use_reloader=False)
+
 
 def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True # This ensures the thread shuts down if the bot stops
+    t = threading.Thread(target=_run_flask, name="flask-keepalive", daemon=True)
     t.start()
+    log.info("Flask keep-alive started.")
 
-# Start the web server thread
-keep_alive()
-bot.infinity_polling()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9.  ENTRY POINT
+# ──────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    keep_alive()
+    log.info("Starting Med-Clear bot polling…")
+    # none_stop=True + restart on connection reset (Error 104 on free tier)
+    bot.infinity_polling(
+        none_stop=True,
+        interval=1,
+        timeout=30,
+        long_polling_timeout=30,
+        logger_level=logging.WARNING,
+        restart_on_change=False,
+    )
