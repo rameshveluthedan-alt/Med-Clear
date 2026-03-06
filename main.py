@@ -37,11 +37,65 @@ bot    = telebot.TeleBot(BOT_TOKEN, threaded=True)
 client = genai.Client(api_key=GEMINI_KEY)
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 1a.  LANGUAGE STORE
+# ──────────────────────────────────────────────────────────────────────────────
+# Maps chat_id → language name, e.g. "Hindi", "Tamil", "English"
+# In-memory; resets on redeploy. Upgrade to Redis for persistence.
+_user_lang: dict[int, str] = {}
+
+SUPPORTED_LANGUAGES = {
+    "1":  "English",
+    "2":  "Hindi",
+    "3":  "Bengali",
+    "4":  "Tamil",
+    "5":  "Telugu",
+    "6":  "Marathi",
+    "7":  "Gujarati",
+    "8":  "Kannada",
+    "9":  "Malayalam",
+    "10": "Punjabi",
+    "11": "Odia",
+    "12": "Urdu",
+}
+
+
+def _get_lang(chat_id: int) -> str:
+    """Return pinned language or 'auto' sentinel."""
+    return _user_lang.get(chat_id, "auto")
+
+
+def _lang_instruction(chat_id: int, sample_text: str = "") -> str:
+    """
+    Return the language rule line to inject into every prompt.
+    • Pinned language  → always use that language.
+    • Auto + text hint → detect from sample_text and mirror it.
+    • Auto + no hint   → default to English.
+    """
+    lang = _get_lang(chat_id)
+    if lang != "auto":
+        return (
+            f"LANGUAGE RULE: You MUST write your entire response in {lang}. "
+            "Keep all HTML tags in ASCII but all visible text in that language. "
+            "Do not switch languages mid-response."
+        )
+    if sample_text.strip():
+        return (
+            "LANGUAGE RULE: Detect the language of the user's message and reply "
+            "entirely in that same language (Hindi, Tamil, Telugu, Bengali, etc.). "
+            "Keep HTML tags in ASCII; all visible text must be in the detected language. "
+            "Do not mix languages."
+        )
+    return "LANGUAGE RULE: Respond in English."
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 1.  SHARED PROMPT & GEMINI HELPERS
 # ──────────────────────────────────────────────────────────────────────────────
 
-ANALYSIS_PROMPT = """\
+def build_analysis_prompt(lang_rule: str) -> str:
+    return f"""\
 You are Med-Clear, a friendly Medical Jargon Interpreter.
+{lang_rule}
+
 Analyze the attached medical document (image or PDF) and do the following:
   1. Extract every lab test, medication, diagnosis code, or medical term.
   2. Explain each item in plain language a patient can understand.
@@ -52,7 +106,7 @@ Analyze the attached medical document (image or PDF) and do the following:
 STRICT OUTPUT FORMAT — HTML ONLY
 You MUST follow every rule below. Violating even one rule makes the response unusable.
 ════════════════════════════════════════
-RULE 1 — DISCLAIMER (first line, always):
+RULE 1 — DISCLAIMER (first line, always — translate the disclaimer text into the response language):
 <i><b>DISCLAIMER: This is an AI-generated summary for informational purposes only. It is NOT medical advice. Always consult a qualified doctor.</b></i>
 
 RULE 2 — SECTION HEADERS:
@@ -73,20 +127,6 @@ Never state a diagnosis. Use "may suggest", "can indicate", or "your doctor will
 
 RULE 7 — MULTI-PAGE / TABLE DOCUMENTS:
 Process every page and every table row. Do not skip values.
-
-Example output skeleton (follow exactly):
-<i><b>DISCLAIMER: ...</b></i>
-
-<u><b>1. SUMMARY OF FINDINGS</b></u>
-• <b>RBS (Random Blood Sugar)</b>: <code>Blood sugar measured at any time of day</code>. Your result: <code>165 mg/dL</code> ⚠️ (normal fasting: <code>70–99 mg/dL</code>).
-
-<u><b>2. MEDICATIONS / PRESCRIPTIONS</b></u>
-• <b>Metformin 500 mg</b>: <code>A medication commonly used to manage blood sugar levels in Type 2 diabetes.</code>
-
-<u><b>3. QUESTIONS TO ASK YOUR DOCTOR</b></u>
-1. ...
-2. ...
-3. ...
 """
 
 _GEMINI_CONFIG = types.GenerateContentConfig(
@@ -212,10 +252,54 @@ def send_welcome(message):
         "3. I will explain complex terms in plain language and give you questions "
         "for your doctor.\n\n"
         "💬 You can also <b>type a question</b> about medical terminology.\n\n"
+        "🌐 <b>multilingual:</b> I auto-detect your language. Type in Hindi, Tamil, "
+        "Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, Punjabi, Odia, or Urdu "
+        "and I'll reply in the same language.\n"
+        "Use /language to pin a preferred language.\n\n"
         "<i>⚠️ I am an AI assistant, not a licensed physician. My summaries are "
         "for informational purposes only and do not replace professional medical advice.</i>"
     )
     bot.reply_to(message, welcome_text, parse_mode="HTML")
+
+
+@bot.message_handler(commands=["language", "lang"])
+def set_language(message):
+    """Let users pin their preferred response language."""
+    lang_list = "\n".join(
+        f"  <code>{k}</code> — {v}" for k, v in SUPPORTED_LANGUAGES.items()
+    )
+    parts = message.text.strip().split(maxsplit=1)
+
+    # /language with no argument → show menu
+    if len(parts) == 1:
+        current = _get_lang(message.chat.id)
+        current_label = current if current != "auto" else "Auto-detect"
+        bot.reply_to(
+            message,
+            f"🌐 <b>Language Settings</b>\n\n"
+            f"Current: <b>{current_label}</b>\n\n"
+            f"Send <code>/language &lt;number&gt;</code> to pin a language:\n{lang_list}\n\n"
+            f"Send <code>/language auto</code> to go back to auto-detect.",
+            parse_mode="HTML",
+        )
+        return
+
+    choice = parts[1].strip().lower()
+
+    # /language auto → reset to auto-detect
+    if choice == "auto":
+        _user_lang.pop(message.chat.id, None)
+        bot.reply_to(message, "✅ Language set to <b>Auto-detect</b>. I will match the language of your messages.", parse_mode="HTML")
+        return
+
+    # /language <number>
+    if choice in SUPPORTED_LANGUAGES:
+        lang_name = SUPPORTED_LANGUAGES[choice]
+        _user_lang[message.chat.id] = lang_name
+        bot.reply_to(message, f"✅ Language set to <b>{lang_name}</b>. All my responses will now be in {lang_name}.", parse_mode="HTML")
+        return
+
+    bot.reply_to(message, "⚠️ Unknown choice. Send /language to see the list.", parse_mode="HTML")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -226,13 +310,16 @@ def send_welcome(message):
 def handle_photo(message):
     status = bot.reply_to(message, "🔍 Analyzing your medical image…")
     try:
-        file_info      = bot.get_file(message.photo[-1].file_id)
-        img_bytes      = bot.download_file(file_info.file_path)
-        img_part       = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
+        file_info = bot.get_file(message.photo[-1].file_id)
+        img_bytes = bot.download_file(file_info.file_path)
+        img_part  = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
-        raw  = _gemini_generate([ANALYSIS_PROMPT, img_part])
+        caption   = message.caption or ""
+        lang_rule = _lang_instruction(message.chat.id, sample_text=caption)
+        prompt    = build_analysis_prompt(lang_rule)
+
+        raw  = _gemini_generate([prompt, img_part])
         text = sanitize_for_telegram(raw)
-
         _edit_or_send(message.chat.id, status.message_id, text)
 
     except Exception as exc:
@@ -263,7 +350,11 @@ def handle_document(message):
             img_bytes = bot.download_file(file_info.file_path)
             img_part  = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
 
-            raw  = _gemini_generate([ANALYSIS_PROMPT, img_part])
+            caption   = message.caption or ""
+            lang_rule = _lang_instruction(message.chat.id, sample_text=caption)
+            prompt    = build_analysis_prompt(lang_rule)
+
+            raw  = _gemini_generate([prompt, img_part])
             text = sanitize_for_telegram(raw)
             _edit_or_send(message.chat.id, status.message_id, text)
         except Exception as exc:
@@ -278,11 +369,15 @@ def handle_document(message):
     if mime_type == "application/pdf":
         status = bot.reply_to(message, "📄 Reading your PDF report… this may take a moment.")
         try:
-            file_info  = bot.get_file(doc.file_id)
-            pdf_bytes  = bot.download_file(file_info.file_path)
-            pdf_part   = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+            file_info = bot.get_file(doc.file_id)
+            pdf_bytes = bot.download_file(file_info.file_path)
+            pdf_part  = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
 
-            raw  = _gemini_generate([ANALYSIS_PROMPT, pdf_part])
+            caption   = message.caption or ""
+            lang_rule = _lang_instruction(message.chat.id, sample_text=caption)
+            prompt    = build_analysis_prompt(lang_rule)
+
+            raw  = _gemini_generate([prompt, pdf_part])
             text = sanitize_for_telegram(raw)
             _edit_or_send(message.chat.id, status.message_id, text)
         except Exception as exc:
@@ -310,16 +405,22 @@ def handle_document(message):
 # 7.  TEXT / FOLLOW-UP Q&A HANDLER  (Objective 5 — guardrails)
 # ──────────────────────────────────────────────────────────────────────────────
 
-_TEXT_SYSTEM = """\
+def build_text_prompt(lang_rule: str, user_question: str) -> str:
+    return f"""\
 You are Med-Clear, a Medical Jargon Interpreter.
+{lang_rule}
+
 A user is asking a follow-up question about medical terminology or their report.
 
 STRICT RULES:
 1. NEVER provide a diagnosis or say "you have [condition]".
 2. ALWAYS use hedging language: "may suggest", "can indicate", "your doctor will determine".
 3. Format with Telegram HTML only (no Markdown).
-4. End EVERY response with:
+4. Translate the disclaimer below into the response language, but keep the HTML tags in ASCII.
+5. End EVERY response with:
 <i><b>Remember: This information is for educational purposes only. Please consult your doctor for personalized medical advice.</b></i>
+
+User question: {user_question}
 """
 
 @bot.message_handler(func=lambda m: m.content_type == "text")
@@ -330,8 +431,9 @@ def handle_text(message):
 
     status = bot.reply_to(message, "💬 Looking that up for you…")
     try:
-        full_prompt = _TEXT_SYSTEM + "\n\nUser question: " + user_text
-        raw = _gemini_generate([full_prompt])
+        lang_rule = _lang_instruction(message.chat.id, sample_text=user_text)
+        full_prompt = build_text_prompt(lang_rule, user_text)
+        raw  = _gemini_generate([full_prompt])
         text = sanitize_for_telegram(raw)
         _edit_or_send(message.chat.id, status.message_id, text)
     except Exception as exc:
