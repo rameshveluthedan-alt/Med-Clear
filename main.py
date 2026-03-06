@@ -330,9 +330,8 @@ def handle_text(message):
 
     status = bot.reply_to(message, "💬 Looking that up for you…")
     try:
-        raw = _gemini_generate([
-            {"role": "user", "parts": [_TEXT_SYSTEM + "\n\nUser question: " + user_text]}
-        ])
+        full_prompt = _TEXT_SYSTEM + "\n\nUser question: " + user_text
+        raw = _gemini_generate([full_prompt])
         text = sanitize_for_telegram(raw)
         _edit_or_send(message.chat.id, status.message_id, text)
     except Exception as exc:
