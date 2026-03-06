@@ -163,39 +163,73 @@ def _gemini_generate(parts: list) -> str:
 # 2.  HTML SANITIZER  (Objective 1 — strict formatting)
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Tags that Telegram's HTML parser actually supports
-_ALLOWED_TAGS = {"b", "i", "u", "s", "code", "pre", "a"}
+# Telegram only supports these tags — anything else must be escaped
+_SAFE_OPEN  = re.compile(r"<(b|i|u|s|code|pre)>", re.IGNORECASE)
+_SAFE_CLOSE = re.compile(r"</(b|i|u|s|code|pre)>", re.IGNORECASE)
+
+def _escape_text_nodes(text: str) -> str:
+    """
+    Walk through the response and escape any bare < > & characters that appear
+    OUTSIDE of known safe HTML tags.  This is the root cause of Telegram
+    dropping parse_mode and showing raw tags — a single unescaped character
+    (e.g. <code>4000–11000 /µL</code> when the model writes a stray < anywhere)
+    poisons the entire message.
+
+    Strategy:
+      1. Tokenise into alternating (raw-text, tag) segments.
+      2. Escape & < > only in raw-text segments.
+      3. Rejoin.
+    """
+    # Split on any HTML tag (keep delimiters via capturing group)
+    parts = re.split(r"(</?[a-zA-Z][^>]*?>)", text)
+    result = []
+    for part in parts:
+        if re.match(r"</?[a-zA-Z][^>]*?>", part):
+            # It's a tag — keep as-is (it will be validated below)
+            result.append(part)
+        else:
+            # It's a text node — escape special chars
+            part = part.replace("&", "&amp;")
+            part = part.replace("<", "&lt;")
+            part = part.replace(">", "&gt;")
+            result.append(part)
+    return "".join(result)
+
+
+def _remove_unsupported_tags(text: str) -> str:
+    """Strip any HTML tags Telegram does not support (e.g. <div>, <span>, <br>)."""
+    # Replace <br> / <br/> with newline
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    # Remove all remaining unsupported open/close tags
+    allowed = {"b", "i", "u", "s", "code", "pre", "a"}
+    def _remove(m):
+        tag = re.sub(r"[</> ]", "", m.group(0)).split()[0].lower().rstrip("/")
+        return m.group(0) if tag in allowed else ""
+    text = re.sub(r"</?[a-zA-Z][^>]*?>", _remove, text)
+    return text
+
 
 def _strip_markdown(text: str) -> str:
-    """
-    Belt-and-suspenders: remove residual Markdown that Gemini might sneak in
-    even after explicit instructions.
-    """
-    # Bold/italic asterisks
+    """Remove residual Markdown that Gemini occasionally produces."""
     text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text, flags=re.DOTALL)
-    # Bold/italic underscores
     text = re.sub(r"_{1,2}(.+?)_{1,2}", r"\1", text, flags=re.DOTALL)
-    # ATX headers (#, ##, ###)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    # Inline code backticks NOT inside <code> (rare but possible)
-    text = re.sub(r"(?<!<code>)`([^`]+)`(?!</code>)", r"<code>\1</code>", text)
+    # Bare backtick → <code> only when not already inside a <code> block
+    text = re.sub(r"`([^`<>]+)`", r"<code>\1</code>", text)
     return text
 
 
 def _ensure_disclaimer(text: str) -> str:
     """
-    Only prepend English fallback if model produced NO disclaimer at all.
-    Detects any disclaimer by checking for <i><b> near the top — works for
-    all languages since HTML tags are always ASCII.
+    Only prepend English fallback if the model produced no disclaimer at all.
+    Works for all languages — the HTML tags are always ASCII regardless of
+    the disclaimer's language.
     """
     stripped = text.strip()
-    # Model already opened with a (possibly translated) disclaimer
     if stripped.startswith("<i><b>"):
-        return text
-    # Disclaimer present but preceded by a short preamble
-    if "<i><b>" in stripped[:300]:
-        return text
-    # Truly missing — prepend English fallback
+        return text                       # translated disclaimer already present
+    if "<i><b>" in stripped[:400]:
+        return text                       # disclaimer after a short preamble
     disclaimer = (
         "<i><b>DISCLAIMER: This is an AI-generated summary for informational "
         "purposes only. It is NOT medical advice. Always consult a qualified "
@@ -205,8 +239,16 @@ def _ensure_disclaimer(text: str) -> str:
 
 
 def sanitize_for_telegram(text: str) -> str:
-    """Full pipeline: strip Markdown → guarantee disclaimer."""
+    """
+    Full sanitisation pipeline — order matters:
+      1. Strip Markdown (before we look at HTML structure)
+      2. Remove unsupported tags
+      3. Escape stray < > & in text nodes   ← fixes the raw-tag display bug
+      4. Guarantee a disclaimer is present
+    """
     text = _strip_markdown(text)
+    text = _remove_unsupported_tags(text)
+    text = _escape_text_nodes(text)
     text = _ensure_disclaimer(text)
     return text.strip()
 
