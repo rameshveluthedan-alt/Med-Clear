@@ -134,7 +134,7 @@ _GEMINI_CONFIG = types.GenerateContentConfig(
     media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
 )
 
-_MODEL_PRIMARY  = "gemini-3.1-flash-lite-preview"   # best OCR + thinking
+_MODEL_PRIMARY  = "gemini-2.5-flash-preview-05-20"   # best OCR + thinking
 _MODEL_FALLBACK = "gemini-2.0-flash"                 # stable backup
 
 
@@ -295,23 +295,18 @@ def _edit_or_send(chat_id: int, message_id: int, text: str) -> None:
 
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
-    welcome_text = (
+    # Greet and immediately present the language picker
+    greeting = (
         "👋 <b>Welcome to Med-Clear!</b>\n\n"
         "I am your AI Medical Jargon Interpreter, powered by Gemini.\n\n"
-        "📸 <u><b>How to use me:</b></u>\n"
-        "1. Take a clear photo of a medical report, lab result, or prescription.\n"
-        "2. Send it here — or upload a <b>PDF</b>.\n"
-        "3. I will explain complex terms in plain language and give you questions "
-        "for your doctor.\n\n"
-        "💬 You can also <b>type a question</b> about medical terminology.\n\n"
-        "🌐 <b>multilingual:</b> I auto-detect your language. Type in Hindi, Tamil, "
-        "Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, Punjabi, Odia, or Urdu "
-        "and I'll reply in the same language.\n"
-        "Use /language to pin a preferred language.\n\n"
-        "<i>⚠️ I am an AI assistant, not a licensed physician. My summaries are "
-        "for informational purposes only and do not replace professional medical advice.</i>"
+        "🌐 <b>Please choose your preferred language to get started:</b>"
     )
-    bot.reply_to(message, welcome_text, parse_mode="HTML")
+    bot.send_message(
+        message.chat.id,
+        greeting,
+        parse_mode="HTML",
+        reply_markup=_language_keyboard(),
+    )
 
 
 def _language_keyboard() -> telebot.types.InlineKeyboardMarkup:
@@ -340,6 +335,10 @@ def set_language(message):
     )
 
 
+# Tracks which chats have already received the full welcome message
+_welcomed: set[int] = set()
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("lang:"))
 def handle_language_callback(call):
     """Handle taps on the language inline keyboard."""
@@ -348,31 +347,43 @@ def handle_language_callback(call):
 
     if choice == "auto":
         _user_lang.pop(chat_id, None)
-        label = "Auto-detect 🔄"
-        reply = "✅ Switched to <b>Auto-detect</b>. I will match the language of your messages."
+        lang_name = "Auto-detect"
     elif choice in SUPPORTED_LANGUAGES:
         lang_name = SUPPORTED_LANGUAGES[choice]
         _user_lang[chat_id] = lang_name
-        label = lang_name
-        reply = f"✅ Language set to <b>{lang_name}</b>. All responses will now be in {lang_name}."
     else:
         bot.answer_callback_query(call.id, "Unknown option.")
         return
 
-    # Update the picker message to show new selection, remove keyboard
+    # Collapse the picker into a single confirmation line (no keyboard)
     try:
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=call.message.message_id,
-            text=f"🌐 <b>Language Settings</b>\n\nCurrent: <b>{label}</b>\n\nTap a language to switch:",
+            text=f"🌐 Language set to <b>{lang_name}</b>. You can change it any time with /language.",
             parse_mode="HTML",
-            reply_markup=_language_keyboard(),
         )
     except Exception:
         pass
 
-    bot.answer_callback_query(call.id, reply.replace("<b>", "").replace("</b>", ""))
-    bot.send_message(chat_id, reply, parse_mode="HTML")
+    # Dismiss the loading spinner on the tapped button
+    bot.answer_callback_query(call.id, f"✅ {lang_name} selected")
+
+    # Send the full how-to-use guide only on first interaction per session
+    if chat_id not in _welcomed:
+        _welcomed.add(chat_id)
+        how_to = (
+            "✅ <b>All set!</b> Here is how to use Med-Clear:\n\n"
+            "📸 Send a <b>photo</b> of a medical report, lab result, or prescription.\n"
+            "📄 Or upload a <b>PDF</b> — multi-page reports work too.\n"
+            "💬 Or just <b>type a question</b> about any medical term.\n\n"
+            "I will explain everything in plain language and suggest questions "
+            "for your doctor.\n\n"
+            "<i>⚠️ I am an AI assistant, not a licensed physician. My summaries are "
+            "for informational purposes only and do not replace professional medical advice.</i>"
+        )
+        bot.send_message(chat_id, how_to, parse_mode="HTML")
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
