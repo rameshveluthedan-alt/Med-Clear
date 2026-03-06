@@ -183,15 +183,25 @@ def _strip_markdown(text: str) -> str:
 
 
 def _ensure_disclaimer(text: str) -> str:
-    """If the model forgot the disclaimer, prepend it."""
+    """
+    Only prepend English fallback if model produced NO disclaimer at all.
+    Detects any disclaimer by checking for <i><b> near the top — works for
+    all languages since HTML tags are always ASCII.
+    """
+    stripped = text.strip()
+    # Model already opened with a (possibly translated) disclaimer
+    if stripped.startswith("<i><b>"):
+        return text
+    # Disclaimer present but preceded by a short preamble
+    if "<i><b>" in stripped[:300]:
+        return text
+    # Truly missing — prepend English fallback
     disclaimer = (
         "<i><b>DISCLAIMER: This is an AI-generated summary for informational "
         "purposes only. It is NOT medical advice. Always consult a qualified "
         "doctor.</b></i>\n\n"
     )
-    if "<i><b>DISCLAIMER" not in text:
-        text = disclaimer + text
-    return text
+    return disclaimer + text
 
 
 def sanitize_for_telegram(text: str) -> str:
@@ -262,44 +272,65 @@ def send_welcome(message):
     bot.reply_to(message, welcome_text, parse_mode="HTML")
 
 
+def _language_keyboard() -> telebot.types.InlineKeyboardMarkup:
+    """Build the inline keyboard for language selection."""
+    kb = telebot.types.InlineKeyboardMarkup(row_width=3)
+    buttons = [
+        telebot.types.InlineKeyboardButton(text=name, callback_data=f"lang:{key}")
+        for key, name in SUPPORTED_LANGUAGES.items()
+    ]
+    # Auto-detect button at the end, full width
+    kb.add(*buttons)
+    kb.add(telebot.types.InlineKeyboardButton(text="🔄 Auto-detect", callback_data="lang:auto"))
+    return kb
+
+
 @bot.message_handler(commands=["language", "lang"])
 def set_language(message):
-    """Let users pin their preferred response language."""
-    lang_list = "\n".join(
-        f"  <code>{k}</code> — {v}" for k, v in SUPPORTED_LANGUAGES.items()
+    """Show the inline language picker."""
+    current = _get_lang(message.chat.id)
+    current_label = current if current != "auto" else "Auto-detect"
+    bot.reply_to(
+        message,
+        f"🌐 <b>Language Settings</b>\n\nCurrent: <b>{current_label}</b>\n\nTap a language to switch:",
+        parse_mode="HTML",
+        reply_markup=_language_keyboard(),
     )
-    parts = message.text.strip().split(maxsplit=1)
 
-    # /language with no argument → show menu
-    if len(parts) == 1:
-        current = _get_lang(message.chat.id)
-        current_label = current if current != "auto" else "Auto-detect"
-        bot.reply_to(
-            message,
-            f"🌐 <b>Language Settings</b>\n\n"
-            f"Current: <b>{current_label}</b>\n\n"
-            f"Send <code>/language &lt;number&gt;</code> to pin a language:\n{lang_list}\n\n"
-            f"Send <code>/language auto</code> to go back to auto-detect.",
-            parse_mode="HTML",
-        )
-        return
 
-    choice = parts[1].strip().lower()
+@bot.callback_query_handler(func=lambda call: call.data.startswith("lang:"))
+def handle_language_callback(call):
+    """Handle taps on the language inline keyboard."""
+    choice = call.data.split(":", 1)[1]
+    chat_id = call.message.chat.id
 
-    # /language auto → reset to auto-detect
     if choice == "auto":
-        _user_lang.pop(message.chat.id, None)
-        bot.reply_to(message, "✅ Language set to <b>Auto-detect</b>. I will match the language of your messages.", parse_mode="HTML")
-        return
-
-    # /language <number>
-    if choice in SUPPORTED_LANGUAGES:
+        _user_lang.pop(chat_id, None)
+        label = "Auto-detect 🔄"
+        reply = "✅ Switched to <b>Auto-detect</b>. I will match the language of your messages."
+    elif choice in SUPPORTED_LANGUAGES:
         lang_name = SUPPORTED_LANGUAGES[choice]
-        _user_lang[message.chat.id] = lang_name
-        bot.reply_to(message, f"✅ Language set to <b>{lang_name}</b>. All my responses will now be in {lang_name}.", parse_mode="HTML")
+        _user_lang[chat_id] = lang_name
+        label = lang_name
+        reply = f"✅ Language set to <b>{lang_name}</b>. All responses will now be in {lang_name}."
+    else:
+        bot.answer_callback_query(call.id, "Unknown option.")
         return
 
-    bot.reply_to(message, "⚠️ Unknown choice. Send /language to see the list.", parse_mode="HTML")
+    # Update the picker message to show new selection, remove keyboard
+    try:
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=call.message.message_id,
+            text=f"🌐 <b>Language Settings</b>\n\nCurrent: <b>{label}</b>\n\nTap a language to switch:",
+            parse_mode="HTML",
+            reply_markup=_language_keyboard(),
+        )
+    except Exception:
+        pass
+
+    bot.answer_callback_query(call.id, reply.replace("<b>", "").replace("</b>", ""))
+    bot.send_message(chat_id, reply, parse_mode="HTML")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
