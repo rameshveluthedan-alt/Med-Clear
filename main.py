@@ -94,7 +94,7 @@ _GEMINI_CONFIG = types.GenerateContentConfig(
     media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
 )
 
-_MODEL_PRIMARY  = "gemini-3.1-flash-lite-preview"   # best OCR + thinking
+_MODEL_PRIMARY  = "gemini-2.5-flash-preview-05-20"   # best OCR + thinking
 _MODEL_FALLBACK = "gemini-2.0-flash"                 # stable backup
 
 
@@ -484,18 +484,86 @@ def keep_alive():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 9.  ENTRY POINT
+# 9.  POLLING WATCHDOG  (survives Render Free Tier cold-starts & Error 104)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_polling_lock = threading.Lock()   # prevents two polling loops racing each other
+_WATCHDOG_INTERVAL = 30            # seconds between liveness checks
+
+
+def _start_polling():
+    """
+    Start infinity_polling inside a dedicated daemon thread.
+    Safe to call multiple times — the lock prevents overlapping loops.
+    """
+    if not _polling_lock.acquire(blocking=False):
+        log.warning("Polling already running — skipping duplicate start.")
+        return
+
+    def _poll():
+        try:
+            log.info("Polling thread started.")
+            bot.infinity_polling(
+                none_stop=True,
+                interval=1,
+                timeout=25,
+                long_polling_timeout=25,
+                logger_level=logging.WARNING,
+                restart_on_change=False,
+            )
+        except Exception as exc:
+            log.error("Polling loop crashed: %s", exc)
+        finally:
+            log.warning("Polling thread exited — watchdog will restart it.")
+            _polling_lock.release()
+
+    t = threading.Thread(target=_poll, name="bot-polling", daemon=True)
+    t.start()
+
+
+def _watchdog():
+    """
+    Runs forever in its own thread.
+    Every WATCHDOG_INTERVAL seconds it checks whether the bot is still
+    connected (get_me succeeds) and whether a polling thread is alive.
+    If either check fails it calls _start_polling() to revive the bot.
+    """
+    # Give the first polling thread time to initialize
+    time.sleep(10)
+
+    while True:
+        try:
+            bot.get_me()                         # lightweight Telegram API ping
+            log.info("Watchdog: bot connection OK.")
+        except Exception as exc:
+            log.warning("Watchdog: connection check failed (%s) — restarting polling.", exc)
+            bot.stop_polling()                   # clean up any zombie state
+            time.sleep(2)
+            _start_polling()
+
+        # Also restart if the polling lock was released (thread died quietly)
+        if not _polling_lock.locked():
+            log.warning("Watchdog: polling thread not running — restarting.")
+            _start_polling()
+
+        time.sleep(_WATCHDOG_INTERVAL)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 10.  ENTRY POINT
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     keep_alive()
-    log.info("Starting Med-Clear bot polling…")
-    # none_stop=True + restart on connection reset (Error 104 on free tier)
-    bot.infinity_polling(
-        none_stop=True,
-        interval=1,
-        timeout=30,
-        long_polling_timeout=30,
-        logger_level=logging.WARNING,
-        restart_on_change=False,
-    )
+
+    # 1. Start the first polling loop
+    _start_polling()
+
+    # 2. Start the watchdog that resurrects polling after idle/cold-start drops
+    wd = threading.Thread(target=_watchdog, name="bot-watchdog", daemon=True)
+    wd.start()
+    log.info("Watchdog started. Med-Clear is live.")
+
+    # 3. Keep the main thread alive (required — if main exits, all daemons die)
+    while True:
+        time.sleep(60)
