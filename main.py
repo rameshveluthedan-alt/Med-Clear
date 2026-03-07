@@ -652,13 +652,32 @@ def home():
 
 @server.route("/health")
 def health():
-    """Health-check endpoint for Cloud Run / Render."""
+    """
+    Health-check endpoint for Cloud Run / Render keep-alive pings.
+    Also used as a wake-up trigger — the first HTTP request after a cold-start
+    hits this route, so we immediately kick the polling loop here rather than
+    waiting up to WATCHDOG_INTERVAL seconds for the watchdog to notice.
+    """
+    if not _polling_lock.locked():
+        log.info("/health triggered polling restart (bot was sleeping).")
+        _start_polling()
     return {"status": "ok", "service": "med-clear"}, 200
+
+
+@server.route("/wake")
+def wake():
+    """
+    Explicit wake endpoint — call this from UptimeRobot or any cron pinger
+    every 10 minutes so Render never goes to sleep in the first place.
+    """
+    if not _polling_lock.locked():
+        log.info("/wake triggered polling restart.")
+        _start_polling()
+    return {"status": "awake", "polling": _polling_lock.locked()}, 200
 
 
 def _run_flask():
     port = int(os.environ.get("PORT", 10000))
-    # use_reloader=False is critical — avoids double-start in threaded environments
     server.run(host="0.0.0.0", port=port, use_reloader=False)
 
 
@@ -672,14 +691,14 @@ def keep_alive():
 # 9.  POLLING WATCHDOG  (survives Render Free Tier cold-starts & Error 104)
 # ──────────────────────────────────────────────────────────────────────────────
 
-_polling_lock = threading.Lock()   # prevents two polling loops racing each other
-_WATCHDOG_INTERVAL = 30            # seconds between liveness checks
+_polling_lock = threading.Lock()
+_WATCHDOG_INTERVAL = 20   # check every 20s — tighter than before
 
 
 def _start_polling():
     """
-    Start infinity_polling inside a dedicated daemon thread.
-    Safe to call multiple times — the lock prevents overlapping loops.
+    Start infinity_polling in a daemon thread.
+    The lock guarantees only one polling loop runs at a time.
     """
     if not _polling_lock.acquire(blocking=False):
         log.warning("Polling already running — skipping duplicate start.")
@@ -688,13 +707,19 @@ def _start_polling():
     def _poll():
         try:
             log.info("Polling thread started.")
+            # Skip any updates that accumulated while the bot was asleep.
+            # allowed_updates=[] means "all types" in pyTelegramBotAPI.
+            # skip_pending=True drops messages sent while offline so we don't
+            # re-process stale /start commands from minutes ago.
+            bot.skip_pending = True
             bot.infinity_polling(
                 none_stop=True,
-                interval=1,
-                timeout=25,
-                long_polling_timeout=25,
+                interval=0,          # no artificial delay between polls
+                timeout=20,
+                long_polling_timeout=20,
                 logger_level=logging.WARNING,
                 restart_on_change=False,
+                allowed_updates=["message", "callback_query"],
             )
         except Exception as exc:
             log.error("Polling loop crashed: %s", exc)
@@ -708,25 +733,25 @@ def _start_polling():
 
 def _watchdog():
     """
-    Runs forever in its own thread.
-    Every WATCHDOG_INTERVAL seconds it checks whether the bot is still
-    connected (get_me succeeds) and whether a polling thread is alive.
-    If either check fails it calls _start_polling() to revive the bot.
+    Heartbeat loop — checks every WATCHDOG_INTERVAL seconds:
+    1. Is the Telegram connection alive? (get_me ping)
+    2. Is the polling thread still running? (lock check)
+    Restarts polling if either check fails.
     """
-    # Give the first polling thread time to initialize
-    time.sleep(10)
+    time.sleep(8)   # let the first polling thread initialise
 
     while True:
         try:
-            bot.get_me()                         # lightweight Telegram API ping
-            log.info("Watchdog: bot connection OK.")
+            bot.get_me()
         except Exception as exc:
-            log.warning("Watchdog: connection check failed (%s) — restarting polling.", exc)
-            bot.stop_polling()                   # clean up any zombie state
+            log.warning("Watchdog: ping failed (%s) — restarting polling.", exc)
+            try:
+                bot.stop_polling()
+            except Exception:
+                pass
             time.sleep(2)
             _start_polling()
 
-        # Also restart if the polling lock was released (thread died quietly)
         if not _polling_lock.locked():
             log.warning("Watchdog: polling thread not running — restarting.")
             _start_polling()
@@ -740,15 +765,11 @@ def _watchdog():
 
 if __name__ == "__main__":
     keep_alive()
-
-    # 1. Start the first polling loop
     _start_polling()
 
-    # 2. Start the watchdog that resurrects polling after idle/cold-start drops
     wd = threading.Thread(target=_watchdog, name="bot-watchdog", daemon=True)
     wd.start()
     log.info("Watchdog started. Med-Clear is live.")
 
-    # 3. Keep the main thread alive (required — if main exits, all daemons die)
     while True:
         time.sleep(60)
