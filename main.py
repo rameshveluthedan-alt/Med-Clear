@@ -1,9 +1,14 @@
 """
-Med-Clear Telegram Bot — Refactored
+Med-Clear Telegram Bot
 ====================================
 Tech Stack : pyTelegramBotAPI + Flask + Google Gemini
 Hosting    : Render Free Tier / Google Cloud Run ready
-Author note: All 5 fine-tuning objectives addressed (see README below)
+Built by   : Ramesh Veluthedan
+Contact    : rameshveluthedan@gmail.com
+Date       : March 2026
+
+Telegram   : https://t.me/med_clear_bot
+Live App   : https://med-clear.onrender.com
 """
 
 import os
